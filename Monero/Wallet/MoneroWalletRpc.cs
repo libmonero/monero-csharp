@@ -20,7 +20,7 @@ namespace Monero.Wallet;
 public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 {
     private readonly WalletHandle _handle;
-    private readonly NativeWorker _worker = new("MoneroWalletRpc");
+    private readonly NativeWorker _worker;
     private readonly object _lock = new();
     private readonly List<MoneroWalletListener> _listeners = [];
     private readonly List<TaskCompletionSource<ulong>> _waiters = [];
@@ -47,6 +47,18 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         {
             Check.Ok(NativeMethods.monero_wallet_rpc_connect(connection, out _handle));
         }
+
+        // the worker comes after the calls that can throw, so that a construction that fails leaves no
+        // thread behind
+        _worker = new("MoneroWalletRpc");
+
+        // the native listener is added once, for the whole life of the handle, and never removed until the
+        // disposal: the rule of the native interop doc, which removes the races of adding and removing it
+        // while the worker calls the wallet. The wallet polls the server while it holds the listener, which
+        // SetPollPeriodInMsAsync tunes
+        _events = new WalletEvents(OnEvent);
+        Check.Ok(NativeMethods.monero_wallet_add_listener(_handle, _events.Handle));
+        _nativeListenerAdded = true;
     }
 
     /// <summary>
@@ -168,15 +180,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             if (_listeners.Contains(listener)) return;
 
             _listeners.Add(listener);
-            try
-            {
-                UpdateNativeListener();
-            }
-            catch
-            {
-                _listeners.Remove(listener);
-                throw;
-            }
         }
     }
 
@@ -188,7 +191,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         lock (_lock)
         {
             if (_disposed || !_listeners.Remove(listener)) return;
-            UpdateNativeListener();
         }
     }
 
@@ -209,25 +211,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             if (_disposed) return;
 
             _listeners.Clear();
-            UpdateNativeListener();
-        }
-    }
-
-    // the wallet polls while a native listener is registered, so there is one while a listener or a waiter exists
-    private void UpdateNativeListener()
-    {
-        var needed = _listeners.Count + _waiters.Count > 0;
-
-        if (needed && !_nativeListenerAdded)
-        {
-            _events ??= new WalletEvents(OnEvent);
-            Check.Ok(NativeMethods.monero_wallet_add_listener(_handle, _events.Handle));
-            _nativeListenerAdded = true;
-        }
-        else if (!needed && _nativeListenerAdded)
-        {
-            Check.Ok(NativeMethods.monero_wallet_remove_listener(_handle, _events!.Handle));
-            _nativeListenerAdded = false;
         }
     }
 
@@ -268,14 +251,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             }
 
             foreach (var waiter in waiters) waiter.TrySetResult(height);
-
-            if (waiters.Length > 0)
-            {
-                lock (wallet._lock)
-                {
-                    if (!wallet._disposed) wallet.UpdateNativeListener();
-                }
-            }
         }
     }
 
@@ -292,15 +267,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         {
             ThrowIfDisposed();
             _waiters.Add(waiter);
-            try
-            {
-                UpdateNativeListener();
-            }
-            catch
-            {
-                _waiters.Remove(waiter);
-                throw;
-            }
         }
 
         await using var registration = ct.Register(() =>
@@ -308,7 +274,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             waiter.TrySetCanceled(ct);
             lock (_lock)
             {
-                if (_waiters.Remove(waiter) && !_disposed) UpdateNativeListener();
+                _waiters.Remove(waiter);
             }
         }).ConfigureAwait(false);
 
