@@ -227,6 +227,49 @@ public class MoneroNativeDisposalUnitTests
         Assert.That(TheWalletIsFreed(wallet), Is.True);
     }
 
+    [Test]
+    public async Task ACallOfTheDaemonThatADrainingDisposalWouldTakeRejectsItself()
+    {
+        using var daemon = NewDaemon();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var blocker = new ManualResetEventSlim(false);
+
+        daemon.AddListener(new DaemonBlockingListener(entered, blocker));
+
+        // the listener of the header holds the drain of the disposal, and the worker of the daemon stays open behind it: without the
+        // guard, the call would run against the handle that the disposal is about to free
+        var dispatch = Task.Run(() => QueueHeader(daemon, """{"height":1}"""));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var disposal = daemon.DisposeAsync().AsTask();
+        Assert.ThrowsAsync<ObjectDisposedException>(() => daemon.GetHeightAsync());
+
+        blocker.Set();
+        await disposal.WaitAsync(TimeSpan.FromSeconds(30));
+        await dispatch.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [Test]
+    public async Task ACallOfTheWalletThatADrainingDisposalWouldTakeRejectsItself()
+    {
+        using var wallet = NewWallet();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var blocker = new ManualResetEventSlim(false);
+
+        wallet.AddListener(new WalletBlockingListener(entered, blocker));
+
+        // see the daemon: the listener of the event holds the drain of the disposal, and the worker stays open behind it
+        var dispatch = Task.Run(() => QueueEvent(wallet, "NewBlock", 5, null));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var disposal = wallet.DisposeAsync().AsTask();
+        Assert.ThrowsAsync<ObjectDisposedException>(() => wallet.GetHeightAsync());
+
+        blocker.Set();
+        await disposal.WaitAsync(TimeSpan.FromSeconds(30));
+        await dispatch.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
     // an offline daemon and wallet: the connection is lazy, so nothing connects, and the notifications are queued by reflection
     // instead of coming from a server
     private static MoneroDaemonRpc NewDaemon() => new("http://127.0.0.1:1");

@@ -308,9 +308,27 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 
     // worker
 
-    private Task<T> Run<T>(Func<WalletHandle, T> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+    // a call that reaches this after the disposal began would run against a handle that is going away, so it is rejected; a call that
+    // already reached the queue or the worker runs, which is the order that the disposal keeps
+    private Task<T> Run<T>(Func<WalletHandle, T> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException<T>(new ObjectDisposedException(GetType().Name));
+        }
 
-    private Task Run(Action<WalletHandle> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
+
+    private Task Run(Action<WalletHandle> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException(new ObjectDisposedException(GetType().Name));
+        }
+
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
 
     private static string Required(string? text) => text ?? throw new MoneroError("The wallet returned no value");
 

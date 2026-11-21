@@ -201,9 +201,27 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
 
     // worker
 
-    private Task<T> Run<T>(Func<DaemonHandle, T> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+    // a call that reaches this after the disposal began would run against a handle that is going away, so it is rejected; a call that
+    // already reached the queue or the worker runs, which is the order that the disposal keeps
+    private Task<T> Run<T>(Func<DaemonHandle, T> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException<T>(new ObjectDisposedException(GetType().Name));
+        }
 
-    private Task Run(Action<DaemonHandle> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
+
+    private Task Run(Action<DaemonHandle> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException(new ObjectDisposedException(GetType().Name));
+        }
+
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
 
     // the txs and the hexes of a query by hashes come in the order of the blocks: sort them by the hashes that were asked for
     private static List<MoneroTx> SortByHashes(List<MoneroTx> txs, IReadOnlyList<string> hashes)
