@@ -2015,11 +2015,12 @@ public class MoneroWalletModelUnitTests
     [Test]
     public void Copy_OfAQueryAsDeepAsTheBound_CopiesIt()
     {
-        // a transaction query wrapped in its own queries 31 times: 63 queries, the deepest chain that a copy of a transaction query makes
+        // a transaction query wrapped in its own queries 31 times and once more: 64 queries, the deepest chain that a copy accepts
         var query = new MoneroTxQuery();
         for (var i = 0; i < MoneroQueryCopy.MaxDepth / 2 - 1; i++) query = new MoneroTxQuery { TransferQuery = new MoneroTransferQuery { TxQuery = query } };
+        var deepest = new MoneroTransferQuery { TxQuery = query };
 
-        Assert.That(query.Copy(), Is.InstanceOf<MoneroTxQuery>());
+        Assert.That(deepest.Copy(), Is.InstanceOf<MoneroTransferQuery>());
     }
 
     [Test]

@@ -819,7 +819,8 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
     /// of <see cref="NotificationError"/> can call it: the dispatcher that runs that code can't wait for the drain of its own events, so
     /// the task is done at once there, and the native objects are freed after the events that were queued were dispatched. Waiting for a
     /// disposal that is still draining, from inside a listener, would wait for that listener to return: fire the disposal and forget it
-    /// there instead.
+    /// there instead. The detection of that case flows with the execution context: a listener that suppresses the flow
+    /// before disposing takes the waiting path, and waits for itself.
     /// </summary>
     /// <returns>a task that ends when the daemon is released.</returns>
     public async ValueTask DisposeAsync()

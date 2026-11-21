@@ -214,7 +214,9 @@ internal sealed class WalletEvents : IDisposable
 
         if (_onDispatcher.Value)
         {
-            // see above: nothing here can wait for the dispatcher, which is running the caller
+            // see above: nothing here can wait for the dispatcher, which is running the caller.
+            // the task is discarded without an observer: a fault of the dispatcher here would skip the frees silently, which cannot
+            // happen while every failure the dispatcher runs is reported through the guarded error handlers
             _ = AfterTheDispatcherAsync(after);
             return Task.CompletedTask;
         }
