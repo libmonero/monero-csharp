@@ -35,11 +35,11 @@ public class MoneroNativeEventsUnitTests
     public async Task TheDaemonDispatchesTheHeadersThatTheCallbacksQueue()
     {
         var headers = new List<MoneroBlockHeader>();
-        using var events = new DaemonEvents(headers.Add, _ => { });
+        var events = new DaemonEvents(headers.Add, _ => { });
 
         QueueHeader(events, """{"height":1}""");
         QueueHeader(events, """{"height":2}""");
-        await events.CompleteAsync();
+        await events.CompleteAsync(events.Dispose);
 
         Assert.That(headers.Select(header => header.Height), Is.EqualTo(new ulong[] { 1, 2 }));
     }
@@ -49,11 +49,11 @@ public class MoneroNativeEventsUnitTests
     {
         var headers = new List<MoneroBlockHeader>();
         var errors = new List<Exception>();
-        using var events = new DaemonEvents(headers.Add, errors.Add);
+        var events = new DaemonEvents(headers.Add, errors.Add);
 
         QueueHeader(events, "not a header");
         QueueHeader(events, """{"height":3}""");
-        await events.CompleteAsync();
+        await events.CompleteAsync(events.Dispose);
 
         Assert.That(headers.Select(header => header.Height), Is.EqualTo(new ulong[] { 3 }));
         Assert.That(errors, Has.Count.EqualTo(1));
@@ -66,11 +66,11 @@ public class MoneroNativeEventsUnitTests
     public async Task AListenerOfTheDaemonThatThrowsIsReportedAndSkipped()
     {
         var errors = new List<Exception>();
-        using var events = new DaemonEvents(_ => throw new InvalidOperationException("the listener threw"), errors.Add);
+        var events = new DaemonEvents(_ => throw new InvalidOperationException("the listener threw"), errors.Add);
 
         QueueHeader(events, """{"height":4}""");
         QueueHeader(events, """{"height":5}""");
-        await events.CompleteAsync();
+        await events.CompleteAsync(events.Dispose);
 
         Assert.That(errors.Select(error => error.Message), Is.EqualTo(new[] { "the listener threw", "the listener threw" }));
     }
@@ -79,11 +79,11 @@ public class MoneroNativeEventsUnitTests
     public async Task TheWalletDispatchesTheEventsThatTheCallbacksQueue()
     {
         var heights = new List<ulong>();
-        using var events = new WalletEvents(call => call(new RecordingListener(heights)), _ => { });
+        var events = new WalletEvents(call => call(new RecordingListener(heights)), _ => { });
 
         QueueEvent(events, "NewBlock", 5, null);
         QueueEvent(events, "NewBlock", 6, null);
-        await events.CompleteAsync();
+        await events.CompleteAsync(events.Dispose);
 
         Assert.That(heights, Is.EqualTo(new ulong[] { 5, 6 }));
     }
@@ -93,11 +93,11 @@ public class MoneroNativeEventsUnitTests
     {
         var heights = new List<ulong>();
         var errors = new List<Exception>();
-        using var events = new WalletEvents(call => call(new RecordingListener(heights)), errors.Add);
+        var events = new WalletEvents(call => call(new RecordingListener(heights)), errors.Add);
 
         QueueEvent(events, "OutputReceived", 0, "not an output");
         QueueEvent(events, "NewBlock", 7, null);
-        await events.CompleteAsync();
+        await events.CompleteAsync(events.Dispose);
 
         Assert.That(heights, Is.EqualTo(new ulong[] { 7 }));
         Assert.That(errors, Has.Count.EqualTo(1));
@@ -110,11 +110,11 @@ public class MoneroNativeEventsUnitTests
     public async Task AListenerOfTheWalletThatThrowsIsReportedAndSkipped()
     {
         var errors = new List<Exception>();
-        using var events = new WalletEvents(_ => throw new InvalidOperationException("the listener threw"), errors.Add);
+        var events = new WalletEvents(_ => throw new InvalidOperationException("the listener threw"), errors.Add);
 
         QueueEvent(events, "NewBlock", 8, null);
         QueueEvent(events, "NewBlock", 9, null);
-        await events.CompleteAsync();
+        await events.CompleteAsync(events.Dispose);
 
         Assert.That(errors.Select(error => error.Message), Is.EqualTo(new[] { "the listener threw", "the listener threw" }));
     }

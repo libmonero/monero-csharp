@@ -16,6 +16,14 @@ internal sealed class DaemonEvents : IDisposable
     private readonly Action<MoneroBlockHeader> _onHeader;
     private readonly Action<Exception> _onError;
     private readonly Task _dispatcher;
+
+    /// <summary>
+    /// Whether the running code is the dispatcher of these events, or what it called: a listener, or a handler of the errors. It is set
+    /// when the dispatcher starts, and flows into everything it runs, whatever thread it lands on, so a caller from there knows it can't
+    /// wait for the drain: the dispatcher would wait for that caller to return, which is that code.
+    /// </summary>
+    private readonly AsyncLocal<bool> _onDispatcher = new();
+
     private GCHandle _self;
 
     public unsafe DaemonEvents(Action<MoneroBlockHeader> onHeader, Action<Exception> onError)
@@ -65,6 +73,10 @@ internal sealed class DaemonEvents : IDisposable
 
     private async Task DispatchAsync()
     {
+        // see _onDispatcher: it is set for the whole life of the dispatcher, since the code that can't wait for the drain is anything
+        // this loop calls, directly or through the waits it starts
+        _onDispatcher.Value = true;
+
         await foreach (var json in _events.Reader.ReadAllAsync().ConfigureAwait(false))
         {
             MoneroBlockHeader header;
@@ -91,11 +103,31 @@ internal sealed class DaemonEvents : IDisposable
         }
     }
 
-    /// <summary>Wait until the events that callbacks queued so far were dispatched. It is done after the listener was removed from the daemon.</summary>
-    public async Task CompleteAsync()
+    /// <summary>
+    /// Wait until the events that callbacks queued so far were dispatched, then run <paramref name="after"/>: what frees the owner of the
+    /// listener, which must not run while the dispatcher still dispatches. It is done after the listener was removed from the daemon.
+    /// When the dispatcher itself runs the caller, from a listener or a handler of the errors, the drain can't be waited for: it would
+    /// wait for the caller to return, which is that code. <paramref name="after"/> follows the exit of the dispatcher instead, and the
+    /// task is done at once.
+    /// </summary>
+    public Task CompleteAsync(Action after)
     {
         _events.Writer.TryComplete();
+
+        if (_onDispatcher.Value)
+        {
+            // see above: nothing here can wait for the dispatcher, which is running the caller
+            _ = AfterTheDispatcherAsync(after);
+            return Task.CompletedTask;
+        }
+
+        return AfterTheDispatcherAsync(after);
+    }
+
+    private async Task AfterTheDispatcherAsync(Action after)
+    {
         await _dispatcher.ConfigureAwait(false);
+        after();
     }
 
     /// <summary>Free the listener. It is done after the listener was removed from the daemon.</summary>

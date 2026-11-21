@@ -570,8 +570,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         {
             if (events != null)
             {
-                await events.CompleteAsync().ConfigureAwait(false);
-                events.Dispose();
+                await events.CompleteAsync(events.Dispose).ConfigureAwait(false);
             }
         }
     }
@@ -1106,7 +1105,10 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 
     /// <summary>
     /// Release the native wallet. The calls that were in the queue run first, and the listeners are unregistered. The wallet stays open on the
-    /// server unless it was closed.
+    /// server unless it was closed. A listener or a handler of <see cref="NotificationError"/> can call it: the dispatcher that runs that
+    /// code can't wait for the drain of its own events, so the task is done at once there, and the native objects are freed after the
+    /// events that were queued were dispatched. Waiting for a disposal that is still draining, from inside a listener, would wait for that
+    /// listener to return: fire the disposal and forget it there instead.
     /// </summary>
     /// <returns>a task that ends when the wallet is released.</returns>
     public async ValueTask DisposeAsync()
@@ -1143,17 +1145,29 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 
         if (_events != null)
         {
-            await _events.CompleteAsync().ConfigureAwait(false);
-            _events.Dispose();
+            // the drain of the events and then the frees: a listener or a handler of the errors that called this disposal can't wait for
+            // them, since the dispatcher is running that code, so they follow the exit of the dispatcher and the task is done at once
+            await _events.CompleteAsync(Free).ConfigureAwait(false);
+        }
+        else
+        {
+            Free();
         }
 
-        _worker.Dispose();
-        _handle.Dispose();
-        GC.SuppressFinalize(this);
+        // the listener, the worker and the handle: freed after the drain, never while the dispatcher still dispatches
+        void Free()
+        {
+            _events?.Dispose();
+            _worker.Dispose();
+            _handle.Dispose();
+            GC.SuppressFinalize(this);
+        }
     }
 
     /// <summary>
-    /// Release the native wallet, and wait for it.
+    /// Release the native wallet, and wait for it. A listener or a handler of <see cref="NotificationError"/> can call it: it returns
+    /// without waiting for the drain there, since the dispatcher that runs that code can't wait for its own events, and the native
+    /// objects are freed after the events that were queued were dispatched.
     /// </summary>
     public void Dispose()
     {
