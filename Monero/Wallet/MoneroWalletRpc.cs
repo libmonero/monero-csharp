@@ -56,7 +56,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         // disposal: the rule of the native interop doc, which removes the races of adding and removing it
         // while the worker calls the wallet. The wallet polls the server while it holds the listener, which
         // SetPollPeriodInMsAsync tunes
-        _events = new WalletEvents(OnEvent);
+        _events = new WalletEvents(OnEvent, OnNotificationError);
         Check.Ok(NativeMethods.monero_wallet_add_listener(_handle, _events.Handle));
         _nativeListenerAdded = true;
     }
@@ -214,6 +214,12 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>
+    /// An exception of the notifications of the wallet: one that a listener threw, or one that came from an event that could not be read.
+    /// The notifications go on after it, even when a handler of it throws.
+    /// </summary>
+    public event EventHandler<Exception>? NotificationError;
+
     // runs on the thread pool, one event after the other
     private void OnEvent(Action<MoneroWalletListener> call)
     {
@@ -230,10 +236,24 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             {
                 call(listener);
             }
-            catch
+            catch (Exception error)
             {
-                // a listener that throws doesn't stop the others
+                // a listener that throws doesn't stop the others, and its error is there to observe
+                OnNotificationError(error);
             }
+        }
+    }
+
+    // a handler of the errors that throws has nothing left to report to, so it doesn't stop the notifications either
+    private void OnNotificationError(Exception error)
+    {
+        try
+        {
+            NotificationError?.Invoke(this, error);
+        }
+        catch
+        {
+            // see above
         }
     }
 
@@ -527,7 +547,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
     public override async Task<MoneroSyncResult> SyncAsync(ulong? startHeight = null, MoneroWalletListener? listener = null, CancellationToken ct = default)
     {
         // the notifications of this sync go to its listener only, and the call returns after they were delivered
-        WalletEvents? events = listener == null ? null : new WalletEvents(call => call(listener));
+        WalletEvents? events = listener == null ? null : new WalletEvents(call => call(listener), OnNotificationError);
 
         try
         {

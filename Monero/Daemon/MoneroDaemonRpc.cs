@@ -42,7 +42,7 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
         // the native listener is added once, for the whole life of the handle, and never removed until the
         // disposal: the rule of the native interop doc, which removes the races of adding and removing it
         // while the worker calls the daemon. The daemon polls the server while it holds the listener
-        _events = new DaemonEvents(OnBlockHeader);
+        _events = new DaemonEvents(OnBlockHeader, OnNotificationError);
         Check.Ok(NativeMethods.monero_daemon_add_listener(_handle, _events.Handle));
         _nativeListenerAdded = true;
     }
@@ -146,6 +146,12 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>
+    /// An exception of the notifications of the daemon: one that a listener threw, or one that came from a block header that could not be
+    /// read. The notifications go on after it, even when a handler of it throws.
+    /// </summary>
+    public event EventHandler<Exception>? NotificationError;
+
     // runs on the thread pool, one header after the other
     private void OnBlockHeader(MoneroBlockHeader header)
     {
@@ -165,13 +171,27 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             {
                 listener.OnBlockHeader(header);
             }
-            catch
+            catch (Exception error)
             {
-                // a listener that throws doesn't stop the others
+                // a listener that throws doesn't stop the others, and its error is there to observe
+                OnNotificationError(error);
             }
         }
 
         foreach (var waiter in waiters) waiter.TrySetResult(header);
+    }
+
+    // a handler of the errors that throws has nothing left to report to, so it doesn't stop the notifications either
+    private void OnNotificationError(Exception error)
+    {
+        try
+        {
+            NotificationError?.Invoke(this, error);
+        }
+        catch
+        {
+            // see above
+        }
     }
 
     private void ThrowIfDisposed()

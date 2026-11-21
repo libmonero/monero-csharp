@@ -15,12 +15,14 @@ internal sealed class WalletEvents : IDisposable
 {
     private readonly Channel<Event> _events = Channel.CreateUnbounded<Event>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Action<Action<MoneroWalletListener>> _onEvent;
+    private readonly Action<Exception> _onError;
     private readonly Task _dispatcher;
     private GCHandle _self;
 
-    public unsafe WalletEvents(Action<Action<MoneroWalletListener>> onEvent)
+    public unsafe WalletEvents(Action<Action<MoneroWalletListener>> onEvent, Action<Exception> onError)
     {
         _onEvent = onEvent;
+        _onError = onError;
         _self = GCHandle.Alloc(this);
 
         try
@@ -134,13 +136,26 @@ internal sealed class WalletEvents : IDisposable
     {
         await foreach (var e in _events.Reader.ReadAllAsync().ConfigureAwait(false))
         {
+            Action<MoneroWalletListener> call;
             try
             {
-                _onEvent(ToCall(e));
+                call = ToCall(e);
             }
-            catch
+            catch (Exception error)
+            {
+                // an event that can't be read is reported, and doesn't stop the next ones
+                _onError(new MoneroError("The wallet sent an event that could not be read", error));
+                continue;
+            }
+
+            try
+            {
+                _onEvent(call);
+            }
+            catch (Exception error)
             {
                 // a listener that throws doesn't stop the others, or the next events
+                _onError(error);
             }
         }
     }

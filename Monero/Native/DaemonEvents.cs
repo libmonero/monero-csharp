@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
+using Monero.Common;
 using Monero.Daemon.Model;
 
 namespace Monero.Native;
@@ -13,12 +14,14 @@ internal sealed class DaemonEvents : IDisposable
 {
     private readonly Channel<string> _events = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Action<MoneroBlockHeader> _onHeader;
+    private readonly Action<Exception> _onError;
     private readonly Task _dispatcher;
     private GCHandle _self;
 
-    public unsafe DaemonEvents(Action<MoneroBlockHeader> onHeader)
+    public unsafe DaemonEvents(Action<MoneroBlockHeader> onHeader, Action<Exception> onError)
     {
         _onHeader = onHeader;
+        _onError = onError;
         _self = GCHandle.Alloc(this);
 
         try
@@ -64,13 +67,26 @@ internal sealed class DaemonEvents : IDisposable
     {
         await foreach (var json in _events.Reader.ReadAllAsync().ConfigureAwait(false))
         {
+            MoneroBlockHeader header;
             try
             {
-                _onHeader(Common.MoneroJson.Deserialize<MoneroBlockHeader>(json));
+                header = MoneroJson.Deserialize<MoneroBlockHeader>(json);
             }
-            catch
+            catch (Exception error)
+            {
+                // a header that can't be read is reported, and doesn't stop the next ones
+                _onError(new MoneroError("The daemon sent a block header that could not be read", error));
+                continue;
+            }
+
+            try
+            {
+                _onHeader(header);
+            }
+            catch (Exception error)
             {
                 // a listener that throws doesn't stop the others, or the next headers
+                _onError(error);
             }
         }
     }
