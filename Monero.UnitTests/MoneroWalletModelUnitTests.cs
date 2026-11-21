@@ -1982,6 +1982,56 @@ public class MoneroWalletModelUnitTests
         Assert.That(query.OutputQuery!.SubaddressIndices, Is.EqualTo(new uint[] { 3 }));
     }
 
+    [Test]
+    public void Copy_OfAQueryThatHoldsItself_IsAnError()
+    {
+        var query = new MoneroTxQuery();
+        query.TransferQuery = new MoneroTransferQuery { TxQuery = query };
+
+        var error = Assert.Throws<MoneroError>(() => query.Copy());
+        Assert.That(error!.Message, Is.EqualTo("The query holds itself, or it is nested more than 64 queries deep"));
+    }
+
+    [Test]
+    public void Copy_OfATransferQueryThatHoldsItself_IsAnError()
+    {
+        var query = new MoneroTransferQuery();
+        query.TxQuery = new MoneroTxQuery { TransferQuery = query };
+
+        var error = Assert.Throws<MoneroError>(() => query.Copy());
+        Assert.That(error!.Message, Is.EqualTo("The query holds itself, or it is nested more than 64 queries deep"));
+    }
+
+    [Test]
+    public void Copy_OfAnOutputQueryThatHoldsItself_IsAnError()
+    {
+        var query = new MoneroOutputQuery();
+        query.TxQuery = new MoneroTxQuery { OutputQuery = query };
+
+        var error = Assert.Throws<MoneroError>(() => new MoneroOutputQuery(query));
+        Assert.That(error!.Message, Is.EqualTo("The query holds itself, or it is nested more than 64 queries deep"));
+    }
+
+    [Test]
+    public void Copy_OfAQueryAsDeepAsTheBound_CopiesIt()
+    {
+        // a transaction query wrapped in its own queries 31 times: 63 queries, the deepest chain that a copy of a transaction query makes
+        var query = new MoneroTxQuery();
+        for (var i = 0; i < MoneroQueryCopy.MaxDepth / 2 - 1; i++) query = new MoneroTxQuery { TransferQuery = new MoneroTransferQuery { TxQuery = query } };
+
+        Assert.That(query.Copy(), Is.InstanceOf<MoneroTxQuery>());
+    }
+
+    [Test]
+    public void Copy_OfAQueryNestedDeeperThanTheBound_IsAnError()
+    {
+        var query = new MoneroTxQuery();
+        for (var i = 0; i < MoneroQueryCopy.MaxDepth; i++) query = new MoneroTxQuery { TransferQuery = new MoneroTransferQuery { TxQuery = query } };
+
+        var error = Assert.Throws<MoneroError>(() => query.Copy());
+        Assert.That(error!.Message, Is.EqualTo("The query holds itself, or it is nested more than 64 queries deep"));
+    }
+
     // ------------------------------------------------------------------------------------------------------------------------------
     // enumerations and text
     // ------------------------------------------------------------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Monero.Common;
 
 namespace Monero.Wallet.Model;
 
@@ -23,8 +24,15 @@ public class MoneroOutputQuery : MoneroOutputWallet
     /// Construct this query as a deep copy of the given query. The query of the transaction is copied too.
     /// </summary>
     /// <param name="query">the query to copy.</param>
-    public MoneroOutputQuery(MoneroOutputQuery query) : base(query)
+    /// <exception cref="MoneroError">the query holds itself, through the query of its transactions.</exception>
+    public MoneroOutputQuery(MoneroOutputQuery query) : this(query, 0)
     {
+    }
+
+    private MoneroOutputQuery(MoneroOutputQuery query, int depth) : base(query)
+    {
+        MoneroQueryCopy.CheckDepth(depth);
+
         MinAmount = query.MinAmount;
         MaxAmount = query.MaxAmount;
 
@@ -33,16 +41,23 @@ public class MoneroOutputQuery : MoneroOutputWallet
             SubaddressIndices = [.. query.SubaddressIndices];
         }
 
-        TxQuery = query.TxQuery?.Copy();
+        TxQuery = query.TxQuery?.Copy(depth + 1);
     }
 
     /// <summary>
     /// Copy this query.
     /// </summary>
     /// <returns>a deep copy of the query, with no transaction.</returns>
+    /// <exception cref="MoneroError">the query holds itself, through the query of its transactions.</exception>
     public override MoneroOutputQuery Copy()
     {
-        return new MoneroOutputQuery(this);
+        return new MoneroOutputQuery(this, 0);
+    }
+
+    /// <summary>Copy this query, as one of the queries of another one that is being copied at the given depth.</summary>
+    internal MoneroOutputQuery Copy(int depth)
+    {
+        return new MoneroOutputQuery(this, depth);
     }
 
     /// <summary>
