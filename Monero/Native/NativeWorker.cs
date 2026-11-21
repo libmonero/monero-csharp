@@ -21,7 +21,7 @@ internal sealed class NativeWorker : IDisposable
         foreach (var work in _queue.GetConsumingEnumerable()) work();
     }
 
-    /// <summary>Run a call on the thread of the handle. A queued call is canceled at once; a running one finishes, but the task is canceled.</summary>
+    /// <summary>Run a call on the thread of the handle. A queued call is canceled at once, and never runs; a running one finishes, and its task completes with its result.</summary>
     public Task<T> RunAsync<T>(Func<T> call, CancellationToken ct = default)
     {
         var done = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
