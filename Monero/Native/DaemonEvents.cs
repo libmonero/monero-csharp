@@ -13,6 +13,7 @@ internal sealed class DaemonEvents : IDisposable
 {
     private readonly Channel<string> _events = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Action<MoneroBlockHeader> _onHeader;
+    private readonly Task _dispatcher;
     private GCHandle _self;
 
     public unsafe DaemonEvents(Action<MoneroBlockHeader> onHeader)
@@ -38,7 +39,7 @@ internal sealed class DaemonEvents : IDisposable
             throw;
         }
 
-        _ = Task.Run(DispatchAsync);
+        _dispatcher = Task.Run(DispatchAsync);
     }
 
     /// <summary>The native listener, to add to the daemon.</summary>
@@ -72,6 +73,13 @@ internal sealed class DaemonEvents : IDisposable
                 // a listener that throws doesn't stop the others, or the next headers
             }
         }
+    }
+
+    /// <summary>Wait until the events that callbacks queued so far were dispatched. It is done after the listener was removed from the daemon.</summary>
+    public async Task CompleteAsync()
+    {
+        _events.Writer.TryComplete();
+        await _dispatcher.ConfigureAwait(false);
     }
 
     /// <summary>Free the listener. It is done after the listener was removed from the daemon.</summary>

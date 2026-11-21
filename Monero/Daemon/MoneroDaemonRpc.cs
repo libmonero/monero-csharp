@@ -74,19 +74,20 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
     /// <summary>
     /// Get the daemon's RPC connection, as it is now: a copy, with the last known state of the server.
     /// </summary>
+    /// <param name="ct">a token to cancel the wait for the result.</param>
     /// <returns>the daemon's RPC connection.</returns>
-    public MoneroRpcConnection GetRpcConnection()
-    {
-        return Check.Json<MoneroRpcConnection>(NativeMethods.monero_daemon_get_rpc_connection(_handle, out var json), json);
-    }
+    public Task<MoneroRpcConnection> GetRpcConnectionAsync(CancellationToken ct = default) =>
+        Run(h => Check.Json<MoneroRpcConnection>(NativeMethods.monero_daemon_get_rpc_connection(h, out var json), json), ct);
 
     /// <summary>
     /// Indicates if the client is connected to the daemon via RPC: the server answered the last request, and it accepted the credentials.
     /// </summary>
+    /// <param name="ct">a token to cancel the wait for the result.</param>
     /// <returns><c>true</c> if the client is connected to the daemon, <c>false</c> otherwise.</returns>
-    public bool IsConnected()
+    public async Task<bool> IsConnectedAsync(CancellationToken ct = default)
     {
-        var connection = GetRpcConnection();
+        var connection = await GetRpcConnectionAsync(ct).ConfigureAwait(false);
+
         return connection.IsOnline == true && connection.IsAuthenticated != false;
     }
 
@@ -94,10 +95,9 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
     /// Set the period between polls of the daemon for block notifications.
     /// </summary>
     /// <param name="periodMs">the poll period in milliseconds, from 1 to 2147483647.</param>
-    public void SetPollPeriodInMs(ulong periodMs)
-    {
-        Check.Ok(NativeMethods.monero_daemon_set_poll_period(_handle, periodMs));
-    }
+    /// <param name="ct">a token to cancel the wait for the result.</param>
+    public Task SetPollPeriodInMsAsync(ulong periodMs, CancellationToken ct = default) =>
+        Run(h => Check.Ok(NativeMethods.monero_daemon_set_poll_period(h, periodMs)), ct);
 
     // listeners
 
@@ -812,7 +812,12 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             }
         }).ConfigureAwait(false);
 
-        _events?.Dispose();
+        if (_events != null)
+        {
+            await _events.CompleteAsync().ConfigureAwait(false);
+            _events.Dispose();
+        }
+
         _worker.Dispose();
         _handle.Dispose();
         GC.SuppressFinalize(this);
