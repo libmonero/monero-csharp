@@ -15,12 +15,22 @@ internal sealed class WalletEvents : IDisposable
 {
     private readonly Channel<Event> _events = Channel.CreateUnbounded<Event>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Action<Action<MoneroWalletListener>> _onEvent;
+    private readonly Action<Exception> _onError;
     private readonly Task _dispatcher;
+
+    /// <summary>
+    /// Whether the running code is the dispatcher of these events, or what it called: a listener, or a handler of the errors. It is set
+    /// when the dispatcher starts, and flows into everything it runs, whatever thread it lands on, so a caller from there knows it can't
+    /// wait for the drain: the dispatcher would wait for that caller to return, which is that code.
+    /// </summary>
+    private readonly AsyncLocal<bool> _onDispatcher = new();
+
     private GCHandle _self;
 
-    public unsafe WalletEvents(Action<Action<MoneroWalletListener>> onEvent)
+    public unsafe WalletEvents(Action<Action<MoneroWalletListener>> onEvent, Action<Exception> onError)
     {
         _onEvent = onEvent;
+        _onError = onError;
         _self = GCHandle.Alloc(this);
 
         try
@@ -132,15 +142,32 @@ internal sealed class WalletEvents : IDisposable
 
     private async Task DispatchAsync()
     {
+        // see _onDispatcher: it is set for the whole life of the dispatcher, since the code that can't wait for the drain is anything
+        // this loop calls, directly or through the waits it starts
+        _onDispatcher.Value = true;
+
         await foreach (var e in _events.Reader.ReadAllAsync().ConfigureAwait(false))
         {
+            Action<MoneroWalletListener> call;
             try
             {
-                _onEvent(ToCall(e));
+                call = ToCall(e);
             }
-            catch
+            catch (Exception error)
+            {
+                // an event that can't be read is reported, and doesn't stop the next ones
+                _onError(new MoneroError("The wallet sent an event that could not be read", error));
+                continue;
+            }
+
+            try
+            {
+                _onEvent(call);
+            }
+            catch (Exception error)
             {
                 // a listener that throws doesn't stop the others, or the next events
+                _onError(error);
             }
         }
     }
@@ -174,11 +201,33 @@ internal sealed class WalletEvents : IDisposable
         }
     }
 
-    /// <summary>Wait until the events that callbacks queued so far were dispatched. It is done after the listener was removed from the wallet.</summary>
-    public async Task CompleteAsync()
+    /// <summary>
+    /// Wait until the events that callbacks queued so far were dispatched, then run <paramref name="after"/>: what frees the owner of the
+    /// listener, which must not run while the dispatcher still dispatches. It is done after the listener was removed from the wallet.
+    /// When the dispatcher itself runs the caller, from a listener or a handler of the errors, the drain can't be waited for: it would
+    /// wait for the caller to return, which is that code. <paramref name="after"/> follows the exit of the dispatcher instead, and the
+    /// task is done at once.
+    /// </summary>
+    public Task CompleteAsync(Action after)
     {
         _events.Writer.TryComplete();
+
+        if (_onDispatcher.Value)
+        {
+            // see above: nothing here can wait for the dispatcher, which is running the caller.
+            // the task is discarded without an observer: a fault of the dispatcher here would skip the frees silently, which cannot
+            // happen while every failure the dispatcher runs is reported through the guarded error handlers
+            _ = AfterTheDispatcherAsync(after);
+            return Task.CompletedTask;
+        }
+
+        return AfterTheDispatcherAsync(after);
+    }
+
+    private async Task AfterTheDispatcherAsync(Action after)
+    {
         await _dispatcher.ConfigureAwait(false);
+        after();
     }
 
     /// <summary>Free the listener. It is done after the listener was removed from the wallet.</summary>

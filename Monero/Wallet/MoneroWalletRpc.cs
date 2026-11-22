@@ -20,7 +20,7 @@ namespace Monero.Wallet;
 public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 {
     private readonly WalletHandle _handle;
-    private readonly NativeWorker _worker = new("MoneroWalletRpc");
+    private readonly NativeWorker _worker;
     private readonly object _lock = new();
     private readonly List<MoneroWalletListener> _listeners = [];
     private readonly List<TaskCompletionSource<ulong>> _waiters = [];
@@ -47,6 +47,18 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         {
             Check.Ok(NativeMethods.monero_wallet_rpc_connect(connection, out _handle));
         }
+
+        // the worker comes after the calls that can throw, so that a construction that fails leaves no
+        // thread behind
+        _worker = new("MoneroWalletRpc");
+
+        // the native listener is added once, for the whole life of the handle, and never removed until the
+        // disposal: the rule of the native interop doc, which removes the races of adding and removing it
+        // while the worker calls the wallet. The wallet polls the server while it holds the listener, which
+        // SetPollPeriodInMsAsync tunes
+        _events = new WalletEvents(OnEvent, OnNotificationError);
+        Check.Ok(NativeMethods.monero_wallet_add_listener(_handle, _events.Handle));
+        _nativeListenerAdded = true;
     }
 
     /// <summary>
@@ -168,15 +180,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             if (_listeners.Contains(listener)) return;
 
             _listeners.Add(listener);
-            try
-            {
-                UpdateNativeListener();
-            }
-            catch
-            {
-                _listeners.Remove(listener);
-                throw;
-            }
         }
     }
 
@@ -188,7 +191,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         lock (_lock)
         {
             if (_disposed || !_listeners.Remove(listener)) return;
-            UpdateNativeListener();
         }
     }
 
@@ -209,27 +211,14 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             if (_disposed) return;
 
             _listeners.Clear();
-            UpdateNativeListener();
         }
     }
 
-    // the wallet polls while a native listener is registered, so there is one while a listener or a waiter exists
-    private void UpdateNativeListener()
-    {
-        var needed = _listeners.Count + _waiters.Count > 0;
-
-        if (needed && !_nativeListenerAdded)
-        {
-            _events ??= new WalletEvents(OnEvent);
-            Check.Ok(NativeMethods.monero_wallet_add_listener(_handle, _events.Handle));
-            _nativeListenerAdded = true;
-        }
-        else if (!needed && _nativeListenerAdded)
-        {
-            Check.Ok(NativeMethods.monero_wallet_remove_listener(_handle, _events!.Handle));
-            _nativeListenerAdded = false;
-        }
-    }
+    /// <summary>
+    /// An exception of the notifications of the wallet: one that a listener threw, or one that came from an event that could not be read.
+    /// The notifications go on after it, even when a handler of it throws.
+    /// </summary>
+    public event EventHandler<Exception>? NotificationError;
 
     // runs on the thread pool, one event after the other
     private void OnEvent(Action<MoneroWalletListener> call)
@@ -247,10 +236,24 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             {
                 call(listener);
             }
-            catch
+            catch (Exception error)
             {
-                // a listener that throws doesn't stop the others
+                // a listener that throws doesn't stop the others, and its error is there to observe
+                OnNotificationError(error);
             }
+        }
+    }
+
+    // a handler of the errors that throws has nothing left to report to, so it doesn't stop the notifications either
+    private void OnNotificationError(Exception error)
+    {
+        try
+        {
+            NotificationError?.Invoke(this, error);
+        }
+        catch
+        {
+            // see above
         }
     }
 
@@ -268,14 +271,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             }
 
             foreach (var waiter in waiters) waiter.TrySetResult(height);
-
-            if (waiters.Length > 0)
-            {
-                lock (wallet._lock)
-                {
-                    if (!wallet._disposed) wallet.UpdateNativeListener();
-                }
-            }
         }
     }
 
@@ -292,15 +287,6 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         {
             ThrowIfDisposed();
             _waiters.Add(waiter);
-            try
-            {
-                UpdateNativeListener();
-            }
-            catch
-            {
-                _waiters.Remove(waiter);
-                throw;
-            }
         }
 
         await using var registration = ct.Register(() =>
@@ -308,7 +294,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
             waiter.TrySetCanceled(ct);
             lock (_lock)
             {
-                if (_waiters.Remove(waiter) && !_disposed) UpdateNativeListener();
+                _waiters.Remove(waiter);
             }
         }).ConfigureAwait(false);
 
@@ -322,9 +308,27 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 
     // worker
 
-    private Task<T> Run<T>(Func<WalletHandle, T> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+    // a call that reaches this after the disposal began would run against a handle that is going away, so it is rejected; a call that
+    // already reached the queue or the worker runs, which is the order that the disposal keeps
+    private Task<T> Run<T>(Func<WalletHandle, T> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException<T>(new ObjectDisposedException(GetType().Name));
+        }
 
-    private Task Run(Action<WalletHandle> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
+
+    private Task Run(Action<WalletHandle> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException(new ObjectDisposedException(GetType().Name));
+        }
+
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
 
     private static string Required(string? text) => text ?? throw new MoneroError("The wallet returned no value");
 
@@ -561,7 +565,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
     public override async Task<MoneroSyncResult> SyncAsync(ulong? startHeight = null, MoneroWalletListener? listener = null, CancellationToken ct = default)
     {
         // the notifications of this sync go to its listener only, and the call returns after they were delivered
-        WalletEvents? events = listener == null ? null : new WalletEvents(call => call(listener));
+        WalletEvents? events = listener == null ? null : new WalletEvents(call => call(listener), OnNotificationError);
 
         try
         {
@@ -584,8 +588,7 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
         {
             if (events != null)
             {
-                await events.CompleteAsync().ConfigureAwait(false);
-                events.Dispose();
+                await events.CompleteAsync(events.Dispose).ConfigureAwait(false);
             }
         }
     }
@@ -1120,7 +1123,11 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 
     /// <summary>
     /// Release the native wallet. The calls that were in the queue run first, and the listeners are unregistered. The wallet stays open on the
-    /// server unless it was closed.
+    /// server unless it was closed. A listener or a handler of <see cref="NotificationError"/> can call it: the dispatcher that runs that
+    /// code can't wait for the drain of its own events, so the task is done at once there, and the native objects are freed after the
+    /// events that were queued were dispatched. Waiting for a disposal that is still draining, from inside a listener, would wait for that
+    /// listener to return: fire the disposal and forget it there instead. The detection of that case flows with the execution context: a listener that suppresses the flow
+    /// before disposing takes the waiting path, and waits for itself.
     /// </summary>
     /// <returns>a task that ends when the wallet is released.</returns>
     public async ValueTask DisposeAsync()
@@ -1157,17 +1164,29 @@ public class MoneroWalletRpc : MoneroWallet, IAsyncDisposable, IDisposable
 
         if (_events != null)
         {
-            await _events.CompleteAsync().ConfigureAwait(false);
-            _events.Dispose();
+            // the drain of the events and then the frees: a listener or a handler of the errors that called this disposal can't wait for
+            // them, since the dispatcher is running that code, so they follow the exit of the dispatcher and the task is done at once
+            await _events.CompleteAsync(Free).ConfigureAwait(false);
+        }
+        else
+        {
+            Free();
         }
 
-        _worker.Dispose();
-        _handle.Dispose();
-        GC.SuppressFinalize(this);
+        // the listener, the worker and the handle: freed after the drain, never while the dispatcher still dispatches
+        void Free()
+        {
+            _events?.Dispose();
+            _worker.Dispose();
+            _handle.Dispose();
+            GC.SuppressFinalize(this);
+        }
     }
 
     /// <summary>
-    /// Release the native wallet, and wait for it.
+    /// Release the native wallet, and wait for it. A listener or a handler of <see cref="NotificationError"/> can call it: it returns
+    /// without waiting for the drain there, since the dispatcher that runs that code can't wait for its own events, and the native
+    /// objects are freed after the events that were queued were dispatched.
     /// </summary>
     public void Dispose()
     {

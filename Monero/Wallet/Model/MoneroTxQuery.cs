@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Monero.Common;
 
 namespace Monero.Wallet.Model;
 
@@ -24,8 +25,15 @@ public class MoneroTxQuery : MoneroTxWallet
     /// Construct this query as a deep copy of the given query. The queries of the transfers and of the outputs are copied too.
     /// </summary>
     /// <param name="query">the query to copy.</param>
-    public MoneroTxQuery(MoneroTxQuery query) : base(query)
+    /// <exception cref="MoneroError">the query holds itself, through the queries it holds.</exception>
+    public MoneroTxQuery(MoneroTxQuery query) : this(query, 0)
     {
+    }
+
+    private MoneroTxQuery(MoneroTxQuery query, int depth) : base(query)
+    {
+        MoneroQueryCopy.CheckDepth(depth);
+
         HasPaymentId = query.HasPaymentId;
         Height = query.Height;
         MinHeight = query.MinHeight;
@@ -42,18 +50,25 @@ public class MoneroTxQuery : MoneroTxWallet
             PaymentIds = [.. query.PaymentIds];
         }
 
-        TransferQuery = query.TransferQuery?.Copy();
-        InputQuery = query.InputQuery?.Copy();
-        OutputQuery = query.OutputQuery?.Copy();
+        TransferQuery = query.TransferQuery?.Copy(depth + 1);
+        InputQuery = query.InputQuery?.Copy(depth + 1);
+        OutputQuery = query.OutputQuery?.Copy(depth + 1);
     }
 
     /// <summary>
     /// Copy this query.
     /// </summary>
     /// <returns>a deep copy of the query.</returns>
+    /// <exception cref="MoneroError">the query holds itself, through the queries it holds.</exception>
     public override MoneroTxQuery Copy()
     {
-        return new MoneroTxQuery(this);
+        return new MoneroTxQuery(this, 0);
+    }
+
+    /// <summary>Copy this query, as one of the queries of another one that is being copied at the given depth.</summary>
+    internal MoneroTxQuery Copy(int depth)
+    {
+        return new MoneroTxQuery(this, depth);
     }
 
     /// <summary>

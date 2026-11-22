@@ -75,8 +75,8 @@ public class MoneroDaemonRpcIntegrationTests : BaseTestClass
         await using var daemon = new MoneroDaemonRpc(offlineConnection);
 
         // test daemon connection
-        Assert.That(daemon.GetRpcConnection().Uri, Is.EqualTo(offlineConnection.Uri));
-        Assert.That(daemon.IsConnected(), Is.False);
+        Assert.That((await daemon.GetRpcConnectionAsync()).Uri, Is.EqualTo(offlineConnection.Uri));
+        Assert.That(await daemon.IsConnectedAsync(), Is.False);
 
         // call to any daemon method should throw network error
         var error = Assert.ThrowsAsync<MoneroError>(() => daemon.GetHeightAsync());
@@ -1059,16 +1059,16 @@ public class MoneroDaemonRpcIntegrationTests : BaseTestClass
 
     // Can set the poll period for block notifications
     [Test, Category(NonRelays)]
-    public void TestSetPollPeriodInMs()
+    public async Task TestSetPollPeriodInMs()
     {
         try
         {
-            Daemon.SetPollPeriodInMs(1000);
+            await Daemon.SetPollPeriodInMsAsync(1000);
         }
         finally
         {
             // restore the configured period so later tests poll at the expected rate
-            Daemon.SetPollPeriodInMs(TestUtils.DaemonPollPeriodInMs);
+            await Daemon.SetPollPeriodInMsAsync(TestUtils.DaemonPollPeriodInMs);
         }
     }
 

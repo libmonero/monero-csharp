@@ -11,7 +11,7 @@ namespace Monero.Daemon;
 public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
 {
     private readonly DaemonHandle _handle;
-    private readonly NativeWorker _worker = new("MoneroDaemonRpc");
+    private readonly NativeWorker _worker;
     private readonly object _lock = new();
     private readonly List<MoneroDaemonListener> _listeners = [];
     private readonly List<TaskCompletionSource<MoneroBlockHeader>> _waiters = [];
@@ -34,6 +34,17 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
         {
             Check.Ok(NativeMethods.monero_daemon_connect_with(connection, out _handle));
         }
+
+        // the worker comes after the calls that can throw, so that a construction that fails leaves no
+        // thread behind
+        _worker = new("MoneroDaemonRpc");
+
+        // the native listener is added once, for the whole life of the handle, and never removed until the
+        // disposal: the rule of the native interop doc, which removes the races of adding and removing it
+        // while the worker calls the daemon. The daemon polls the server while it holds the listener
+        _events = new DaemonEvents(OnBlockHeader, OnNotificationError);
+        Check.Ok(NativeMethods.monero_daemon_add_listener(_handle, _events.Handle));
+        _nativeListenerAdded = true;
     }
 
     /// <summary>
@@ -63,19 +74,20 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
     /// <summary>
     /// Get the daemon's RPC connection, as it is now: a copy, with the last known state of the server.
     /// </summary>
+    /// <param name="ct">a token to cancel the wait for the result.</param>
     /// <returns>the daemon's RPC connection.</returns>
-    public MoneroRpcConnection GetRpcConnection()
-    {
-        return Check.Json<MoneroRpcConnection>(NativeMethods.monero_daemon_get_rpc_connection(_handle, out var json), json);
-    }
+    public Task<MoneroRpcConnection> GetRpcConnectionAsync(CancellationToken ct = default) =>
+        Run(h => Check.Json<MoneroRpcConnection>(NativeMethods.monero_daemon_get_rpc_connection(h, out var json), json), ct);
 
     /// <summary>
     /// Indicates if the client is connected to the daemon via RPC: the server answered the last request, and it accepted the credentials.
     /// </summary>
+    /// <param name="ct">a token to cancel the wait for the result.</param>
     /// <returns><c>true</c> if the client is connected to the daemon, <c>false</c> otherwise.</returns>
-    public bool IsConnected()
+    public async Task<bool> IsConnectedAsync(CancellationToken ct = default)
     {
-        var connection = GetRpcConnection();
+        var connection = await GetRpcConnectionAsync(ct).ConfigureAwait(false);
+
         return connection.IsOnline == true && connection.IsAuthenticated != false;
     }
 
@@ -83,10 +95,9 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
     /// Set the period between polls of the daemon for block notifications.
     /// </summary>
     /// <param name="periodMs">the poll period in milliseconds, from 1 to 2147483647.</param>
-    public void SetPollPeriodInMs(ulong periodMs)
-    {
-        Check.Ok(NativeMethods.monero_daemon_set_poll_period(_handle, periodMs));
-    }
+    /// <param name="ct">a token to cancel the wait for the result.</param>
+    public Task SetPollPeriodInMsAsync(ulong periodMs, CancellationToken ct = default) =>
+        Run(h => Check.Ok(NativeMethods.monero_daemon_set_poll_period(h, periodMs)), ct);
 
     // listeners
 
@@ -101,15 +112,6 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             if (_listeners.Contains(listener)) return;
 
             _listeners.Add(listener);
-            try
-            {
-                UpdateNativeListener();
-            }
-            catch
-            {
-                _listeners.Remove(listener);
-                throw;
-            }
         }
     }
 
@@ -121,7 +123,6 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
         lock (_lock)
         {
             if (_disposed || !_listeners.Remove(listener)) return;
-            UpdateNativeListener();
         }
     }
 
@@ -142,27 +143,14 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             if (_disposed) return;
 
             _listeners.Clear();
-            UpdateNativeListener();
         }
     }
 
-    // the daemon polls while a native listener is registered, so there is one while a listener or a waiter exists
-    private void UpdateNativeListener()
-    {
-        var needed = _listeners.Count + _waiters.Count > 0;
-
-        if (needed && !_nativeListenerAdded)
-        {
-            _events ??= new DaemonEvents(OnBlockHeader);
-            Check.Ok(NativeMethods.monero_daemon_add_listener(_handle, _events.Handle));
-            _nativeListenerAdded = true;
-        }
-        else if (!needed && _nativeListenerAdded)
-        {
-            Check.Ok(NativeMethods.monero_daemon_remove_listener(_handle, _events!.Handle));
-            _nativeListenerAdded = false;
-        }
-    }
+    /// <summary>
+    /// An exception of the notifications of the daemon: one that a listener threw, or one that came from a block header that could not be
+    /// read. The notifications go on after it, even when a handler of it throws.
+    /// </summary>
+    public event EventHandler<Exception>? NotificationError;
 
     // runs on the thread pool, one header after the other
     private void OnBlockHeader(MoneroBlockHeader header)
@@ -183,20 +171,26 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             {
                 listener.OnBlockHeader(header);
             }
-            catch
+            catch (Exception error)
             {
-                // a listener that throws doesn't stop the others
+                // a listener that throws doesn't stop the others, and its error is there to observe
+                OnNotificationError(error);
             }
         }
 
         foreach (var waiter in waiters) waiter.TrySetResult(header);
+    }
 
-        if (waiters.Length > 0)
+    // a handler of the errors that throws has nothing left to report to, so it doesn't stop the notifications either
+    private void OnNotificationError(Exception error)
+    {
+        try
         {
-            lock (_lock)
-            {
-                if (!_disposed) UpdateNativeListener();
-            }
+            NotificationError?.Invoke(this, error);
+        }
+        catch
+        {
+            // see above
         }
     }
 
@@ -207,9 +201,27 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
 
     // worker
 
-    private Task<T> Run<T>(Func<DaemonHandle, T> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+    // a call that reaches this after the disposal began would run against a handle that is going away, so it is rejected; a call that
+    // already reached the queue or the worker runs, which is the order that the disposal keeps
+    private Task<T> Run<T>(Func<DaemonHandle, T> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException<T>(new ObjectDisposedException(GetType().Name));
+        }
 
-    private Task Run(Action<DaemonHandle> call, CancellationToken ct) => _worker.RunAsync(() => call(_handle), ct);
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
+
+    private Task Run(Action<DaemonHandle> call, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return Task.FromException(new ObjectDisposedException(GetType().Name));
+        }
+
+        return _worker.RunAsync(() => call(_handle), ct);
+    }
 
     // the txs and the hexes of a query by hashes come in the order of the blocks: sort them by the hashes that were asked for
     private static List<MoneroTx> SortByHashes(List<MoneroTx> txs, IReadOnlyList<string> hashes)
@@ -279,15 +291,6 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
         {
             ThrowIfDisposed();
             _waiters.Add(waiter);
-            try
-            {
-                UpdateNativeListener();
-            }
-            catch
-            {
-                _waiters.Remove(waiter);
-                throw;
-            }
         }
 
         await using var registration = ct.Register(() =>
@@ -295,7 +298,7 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             waiter.TrySetCanceled(ct);
             lock (_lock)
             {
-                if (_waiters.Remove(waiter) && !_disposed) UpdateNativeListener();
+                _waiters.Remove(waiter);
             }
         }).ConfigureAwait(false);
 
@@ -812,7 +815,12 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
     // closing
 
     /// <summary>
-    /// Release the native daemon. The calls that were in the queue run first, and the listeners are unregistered.
+    /// Release the native daemon. The calls that were in the queue run first, and the listeners are unregistered. A listener or a handler
+    /// of <see cref="NotificationError"/> can call it: the dispatcher that runs that code can't wait for the drain of its own events, so
+    /// the task is done at once there, and the native objects are freed after the events that were queued were dispatched. Waiting for a
+    /// disposal that is still draining, from inside a listener, would wait for that listener to return: fire the disposal and forget it
+    /// there instead. The detection of that case flows with the execution context: a listener that suppresses the flow
+    /// before disposing takes the waiting path, and waits for itself.
     /// </summary>
     /// <returns>a task that ends when the daemon is released.</returns>
     public async ValueTask DisposeAsync()
@@ -847,14 +855,31 @@ public class MoneroDaemonRpc : MoneroDaemon, IAsyncDisposable, IDisposable
             }
         }).ConfigureAwait(false);
 
-        _events?.Dispose();
-        _worker.Dispose();
-        _handle.Dispose();
-        GC.SuppressFinalize(this);
+        if (_events != null)
+        {
+            // the drain of the events and then the frees: a listener or a handler of the errors that called this disposal can't wait for
+            // them, since the dispatcher is running that code, so they follow the exit of the dispatcher and the task is done at once
+            await _events.CompleteAsync(Free).ConfigureAwait(false);
+        }
+        else
+        {
+            Free();
+        }
+
+        // the listener, the worker and the handle: freed after the drain, never while the dispatcher still dispatches
+        void Free()
+        {
+            _events?.Dispose();
+            _worker.Dispose();
+            _handle.Dispose();
+            GC.SuppressFinalize(this);
+        }
     }
 
     /// <summary>
-    /// Release the native daemon, and wait for it.
+    /// Release the native daemon, and wait for it. A listener or a handler of <see cref="NotificationError"/> can call it: it returns
+    /// without waiting for the drain there, since the dispatcher that runs that code can't wait for its own events, and the native
+    /// objects are freed after the events that were queued were dispatched.
     /// </summary>
     public void Dispose()
     {

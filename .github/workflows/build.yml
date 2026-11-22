@@ -31,19 +31,20 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
           submodules: true
 
       # where the project Monero.Native leaves the library when it is built locally, and where Monero copies it from
       - name: Download the library
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: monero-c-linux-x86_64
           path: external/monero-c/build
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
@@ -57,7 +58,7 @@ jobs:
 
       # the program and the files it needs, which unit-tests.yml runs on every platform without building them again
       - name: Upload the unit tests
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: monero-csharp-tests
           path: Monero.UnitTests/bin/Release/net10.0
@@ -65,7 +66,7 @@ jobs:
 
       # the same for the integration tests, which integration-tests.yml runs against the regtest network
       - name: Upload the integration tests
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: monero-csharp-integration-tests
           path: Monero.IntegrationTests/bin/Release/net10.0
@@ -83,7 +84,7 @@ jobs:
 
       - name: Upload the coverage report
         if: steps.coverage.outcome == 'success'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-reports
           path: coverage-reports
